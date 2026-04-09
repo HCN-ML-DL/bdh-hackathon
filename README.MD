@@ -1,128 +1,188 @@
-# 🐉 Dragon Hatchling (BDH) – Hackathon Demo
+# 🧠 BDH Inference-Time Learning (Hackathon Project)
 
 ## 🚀 Overview
-This repository contains our hackathon implementation of Dragon Hatchling (BDH), a biologically inspired language modeling architecture that combines ideas from Transformers, state-space models, and brain-inspired graph dynamics.
 
-Unlike traditional Transformer models, BDH focuses on sparse activations, local interactions, and Hebbian-style updates to enable more interpretable and dynamic reasoning.
+This project demonstrates a **BDH (Brain-Driven Hebbian) language model** that can **learn during inference**, unlike traditional Transformer models.
 
----
+The system compares:
 
-## 🎯 Problem Statement
-Modern language models struggle with:
-- Incorporating new facts at inference time
-- Maintaining interpretable internal representations
-- Avoiding heavy reliance on retraining or fine-tuning
+* 🧠 **BDH model** → updates internal state dynamically using Hebbian learning
+* 🤖 **GPT-2** → static weights, no learning during inference
 
-This project explores a BDH-style approach to dynamically update knowledge and answer questions about previously unseen facts.
+A Streamlit interface allows real-time text generation and visualization of **state updates**.
 
 ---
 
-## 💡 Approach
-The BDH pipeline in this project follows:
+## 🧠 Key Idea
 
-1. Token / byte embedding  
-2. Expansion to high-dimensional space  
-3. ReLU-based sparsification  
-4. Linear attention (causal)  
-5. Hebbian-style gating mechanism  
-6. Compression back to model dimension  
-7. Output projection  
+Traditional models:
 
-This allows sparse neuron-like activations and dynamic memory updates.
+```
+output = softmax(QKᵀ)V
+# weights are frozen during inference
+```
 
----
+BDH model:
 
-## 🧪 Demo Workflow
+```
+output = query @ state
+state += keyᵀ @ value   # Hebbian update
+```
 
-Step 1: Load trained BDH model  
+👉 This enables:
 
-Step 2: Inject new facts (unseen during training)
-
-Example:
-The CEO of NeuraCorp is Alice Zhang  
-The capital of Zephyria is Windholm  
-
-Step 3: Query the model  
-
-Example:
-Who is the CEO of NeuraCorp? → Alice Zhang  
-What is the capital of Zephyria? → Windholm  
+* Learning new patterns **without retraining**
+* Dynamic memory updates
+* More biologically inspired computation
 
 ---
 
-## 📂 Repository Structure
+## ✨ Features
 
+* ⚡ Inference-time learning via Hebbian updates
+* 🧪 Side-by-side comparison with GPT-2
+* 📊 Visualization of per-layer state changes
+* 🧬 Sparse neuron-style activations
+* 🔁 Linear attention (no softmax bottleneck)
+* 🖥 Interactive Streamlit UI
+
+---
+
+## 📂 Project Structure
+
+```
 .
-├── app.py                # Inference / demo script  
-├── train.py              # Training pipeline  
-├── bdh_model.py          # Model architecture  
-├── requirements.txt      # Dependencies  
-└── checkpoints/          # Model checkpoints (not included)  
+├── app.py              # Streamlit demo (inference + visualization)
+├── train.py            # Training pipeline (optimized for L4 GPU)
+├── bdh_model.py        # BDH architecture implementation
+├── requirements.txt    # Dependencies
+├── checkpoints/        # Model weights (not included)
+└── bdh.ipynb           # Notebook experiments
+```
 
 ---
 
-## ⚙️ Setup
+## ⚙️ Installation
 
-Install dependencies:
-
+```bash
 pip install -r requirements.txt
+```
 
 ---
 
-## ▶️ Run
+## ▶️ Run the Demo
 
-python app.py
+```bash
+streamlit run app.py
+```
 
-If needed:
+Then open:
 
-python app.py --checkpoint checkpoints/bdh_final.pt
+```
+http://localhost:8501
+```
+
+---
+
+## 🧪 What the Demo Does
+
+1. Enter a story prompt
+2. BDH generates text **while updating internal state**
+3. GPT-2 generates text **without learning**
+4. Compare outputs + state changes
+
+---
+
+## 📊 Example Output
+
+* BDH shows:
+
+  * Layer-wise state updates
+  * Total "learning magnitude"
+
+* GPT-2 shows:
+
+  * ❌ No updates (static model)
 
 ---
 
 ## 🏋️ Training
 
+Train BDH model:
+
+```bash
 python train.py
+```
+
+### Training Details
+
+* Dataset: HuggingFace dataset (TinyStories expected) 
+* Byte-level tokenization
+* Sequence length: 256
+* Optimized for L4 GPU (TF32 enabled) 
+* Gradient accumulation + mixed precision
 
 ---
 
-## ⚠️ Model Checkpoints
+## 🧠 Model Architecture
 
-Model weights are not included due to GitHub file size limits.
+Defined in `bdh_model.py` 
 
-Place your checkpoint manually in:
+### Core Components:
 
+* Byte-level embedding (vocab=256)
+* Multi-layer BDH blocks
+* Rotary positional embeddings
+* Hebbian state updates
+* Sparse gated activations (~5%)
+
+### Key Innovation:
+
+* **State matrix evolves during generation**
+* No KV-cache growth like transformers
+* Memory is compressed + dynamic
+
+---
+
+## ⚠️ Checkpoints
+
+Model weights are not included.
+
+Place your trained model here:
+
+```
 checkpoints/bdh_final.pt
-
----
-
-## 🧠 Key Concepts
-
-- Sparse activations  
-- Linear attention  
-- Hebbian learning  
-- State + graph hybrid reasoning  
-
----
-
-## 🔥 Future Work
-
-- Better demo UI  
-- Transformer vs BDH comparison  
-- Visualization of learned connections  
-- Larger scale training  
+```
 
 ---
 
 ## 🛠 Tech Stack
 
-- Python  
-- PyTorch  
-- Custom BDH architecture  
+* PyTorch
+* Streamlit
+* HuggingFace Transformers (GPT-2 baseline)
+* Datasets library 
 
 ---
 
-## 👥 Team
+## 🔥 Future Work
 
-Hackathon project
+* Larger scale training
+* Better evaluation metrics
+* Visualization of neuron activations
+* Real-world knowledge injection tests
 
 ---
+
+## 👥 Acknowledgment
+
+Based on BDH architecture concepts from:
+https://github.com/pathwaycom/bdh 
+
+---
+
+## 🧠 Key Takeaway
+
+> BDH introduces a shift from static models to **adaptive systems that learn while generating**.
+
+This project demonstrates a step toward **continual learning in LLMs without retraining**.
