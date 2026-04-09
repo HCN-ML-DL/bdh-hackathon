@@ -1,0 +1,17 @@
+# Ignore model checkpoints (VERY IMPORTANT)
+*.pt
+checkpoints/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env/
+
+# OS junk
+.DS_Store
+Thumbs.db
