@@ -15,6 +15,12 @@ from datasets import load_from_disk
 from bdh_model import BDH
 from tqdm import tqdm
 
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('medium')
+
 # ============================================================
 # CONFIG - Reduced for L4 (23GB VRAM)
 # ============================================================
@@ -172,7 +178,7 @@ def upload_checkpoint_to_gcs(checkpoint_path, gcs_checkpoint_dir):
     # Keep upload outside torch save logic so local checkpoints remain usable.
     print(f"Uploading {checkpoint_path} to {gcs_checkpoint_dir}...")
     subprocess.run(
-        ["gsutil", "cp", str(checkpoint_path), gcs_checkpoint_dir],
+        ["gcloud", "storage", "cp", str(checkpoint_path), gcs_checkpoint_dir],
         check=True,
     )
 
@@ -223,7 +229,7 @@ def main():
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model"])
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.1, fused=True)
     
     os.makedirs("checkpoints", exist_ok=True)
     global_step = checkpoint.get("step", 0) if checkpoint is not None else 0
