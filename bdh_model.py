@@ -24,10 +24,17 @@ class RotaryEmbedding(nn.Module):
     
     def forward(self, x, position_offset=0):
         seq_len = x.shape[-2]
-        positions = torch.arange(position_offset, position_offset + seq_len, device=x.device)
-        freqs = torch.outer(positions.float(), self.inv_freq.to(x.device))
-        cos = freqs.cos().unsqueeze(0).unsqueeze(0)
-        sin = freqs.sin().unsqueeze(0).unsqueeze(0)
+        inv_freq = self.inv_freq.to(x.device)
+        if torch.is_tensor(position_offset):
+            positions = position_offset.to(x.device).unsqueeze(-1) + torch.arange(seq_len, device=x.device)
+            freqs = positions.float().unsqueeze(-1) * inv_freq
+            cos = freqs.cos().unsqueeze(1)
+            sin = freqs.sin().unsqueeze(1)
+        else:
+            positions = torch.arange(position_offset, position_offset + seq_len, device=x.device)
+            freqs = torch.outer(positions.float(), inv_freq)
+            cos = freqs.cos().unsqueeze(0).unsqueeze(0)
+            sin = freqs.sin().unsqueeze(0).unsqueeze(0)
         x1, x2 = x[..., 0::2], x[..., 1::2]
         return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).flatten(-2)
 
@@ -49,7 +56,7 @@ class BDHLayer(nn.Module):
         self.rope = RotaryEmbedding(self.head_dim)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, v_star, state=None, position_offset=0, use_state=False):
+    def forward(self, v_star, state=None, position_offset=0, use_state=False, token_mask=None):
         B, T, D = v_star.shape
         device = v_star.device
         v_norm = self.ln(v_star)
@@ -60,6 +67,9 @@ class BDHLayer(nn.Module):
         
         # Apply RoPE
         x_rot = self.rope(x, position_offset)
+        if token_mask is not None:
+            token_mask = token_mask.to(device=device, dtype=x_rot.dtype)
+            x_rot = x_rot * token_mask[:, None, :, None]
         
         # Initialize state if needed
         if state is None:
@@ -72,6 +82,8 @@ class BDHLayer(nn.Module):
             
             # HEBBIAN UPDATE: state += x.T @ v
             v_for_update = v_norm.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            if token_mask is not None:
+                v_for_update = v_for_update * token_mask[:, None, :, None]
             state_update = torch.matmul(x_rot.transpose(-2, -1), v_for_update)
             new_state = state + state_update
         else:
@@ -84,6 +96,9 @@ class BDHLayer(nn.Module):
             a_star = torch.matmul(scores, v_attn)
             
             # Compute state for transitioning to recurrent mode
+            if token_mask is not None:
+                v_attn = v_attn * token_mask[:, None, :, None]
+                a_star = a_star * token_mask[:, None, :, None]
             new_state = torch.matmul(x_rot.transpose(-2, -1), v_attn)
         
         # Second ReLU + gating (more sparsity!)
@@ -127,7 +142,7 @@ class BDH(nn.Module):
         elif isinstance(m, nn.Embedding):
             torch.nn.init.normal_(m.weight, std=0.02)
     
-    def forward(self, idx, targets=None, states=None, use_state=False, position_offset=0):
+    def forward(self, idx, targets=None, states=None, use_state=False, position_offset=0, token_mask=None):
         x = self.embed(idx)
         
         if states is None:
@@ -135,7 +150,7 @@ class BDH(nn.Module):
         
         new_states = []
         for i, layer in enumerate(self.layers):
-            x, new_state = layer(x, states[i], position_offset, use_state)
+            x, new_state = layer(x, states[i], position_offset, use_state, token_mask)
             new_states.append(new_state)
         
         x = self.final_ln(x)
@@ -143,18 +158,90 @@ class BDH(nn.Module):
         
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.reshape(-1, self.vocab_size), targets.reshape(-1), ignore_index=-1)
         return logits, loss, new_states
     
-    def generate(self, idx, max_new_tokens=100, temperature=0.8, top_k=50, use_hebbian=True):
+    def _clone_states(self, states):
+        if states is None:
+            return None
+        return [state.clone() if state is not None else None for state in states]
+
+    def _state_deltas(self, states_before, states_after):
+        if states_after is None:
+            return None
+
+        deltas = []
+        for before, after in zip(states_before or [None] * len(states_after), states_after):
+            if after is None:
+                deltas.append(0.0)
+                continue
+            if before is None:
+                before = torch.zeros_like(after)
+            deltas.append((after - before).norm().item())
+        return deltas
+
+    def encode_to_state(self, idx, initial_states=None, initial_position=0):
+        """Fold input tokens into Hebbian state without sampling new tokens."""
+        _, T = idx.shape
+        states = self._clone_states(initial_states)
+        states_before = self._clone_states(states)
+        position = initial_position
+
+        if T == 0:
+            return self._state_deltas(states_before, states), states, position
+
+        if states is None:
+            # Fresh memory: initialize state directly from the input sequence.
+            _, _, states = self.forward(idx, states=None, use_state=False, position_offset=position)
+            position += T
+        else:
+            # Existing memory: incrementally update state with each input token.
+            for token_idx in range(T):
+                token = idx[:, token_idx:token_idx + 1]
+                _, _, states = self.forward(
+                    token,
+                    states=states,
+                    use_state=True,
+                    position_offset=position
+                )
+                position += 1
+
+        state_deltas = self._state_deltas(states_before, states)
+        return state_deltas, states, position
+
+    def generate(
+        self,
+        idx,
+        max_new_tokens=100,
+        temperature=0.8,
+        top_k=50,
+        use_hebbian=True,
+        initial_states=None,
+        initial_position=0,
+    ):
         """Generate with optional Hebbian state updates."""
         B, T = idx.shape
         
         if use_hebbian:
-            # Process prompt to build initial state
-            _, _, states = self.forward(idx, states=None, use_state=False, position_offset=0)
-            states_after_prompt = [s.clone() for s in states]
-            position = T
+            states = self._clone_states(initial_states)
+            interaction_start_states = self._clone_states(states)
+            position = initial_position
+
+            if states is None:
+                # Fast path for a fresh prompt with no prior Hebbian memory.
+                _, _, states = self.forward(idx, states=None, use_state=False, position_offset=position)
+                position += T
+            else:
+                # Reuse persistent Hebbian memory by folding the new prompt into the existing state.
+                for token_idx in range(T):
+                    token = idx[:, token_idx:token_idx + 1]
+                    _, _, states = self.forward(
+                        token,
+                        states=states,
+                        use_state=True,
+                        position_offset=position
+                    )
+                    position += 1
             
             # Generate token by token with Hebbian updates
             for _ in range(max_new_tokens):
@@ -175,13 +262,8 @@ class BDH(nn.Module):
                 next_token = torch.multinomial(probs, num_samples=1)
                 idx = torch.cat([idx, next_token], dim=1)
             
-            # Compute state deltas
-            state_deltas = []
-            for s_before, s_after in zip(states_after_prompt, states):
-                delta = (s_after - s_before).norm().item()
-                state_deltas.append(delta)
-            
-            return idx, state_deltas
+            state_deltas = self._state_deltas(interaction_start_states, states)
+            return idx, state_deltas, states, position
         else:
             # Standard generation (no state)
             for _ in range(max_new_tokens):
@@ -193,4 +275,4 @@ class BDH(nn.Module):
                 probs = F.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
                 idx = torch.cat([idx, next_token], dim=1)
-            return idx, None
+            return idx, None, None, initial_position
