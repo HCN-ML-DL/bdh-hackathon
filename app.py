@@ -49,7 +49,7 @@ prompt = st.text_area(
 
 col1, col2 = st.columns([1, 1])
 with col1:
-    max_tokens = st.slider("Generation length", 50, 200, 100)
+    max_tokens = st.slider("Generation length (characters)", 50, 800, 100)
 with col2:
     temperature = st.slider("Temperature", 0.5, 1.5, 0.8)
 
@@ -98,6 +98,10 @@ if st.button("🚀 Generate", type="primary"):
                     pad_token_id=gpt2_tokenizer.eos_token_id
                 )
             gpt2_text = gpt2_tokenizer.decode(output[0], skip_special_tokens=True)
+            
+            # Truncate GPT-2 matching the exact new character count of BDH.
+            # GPT-2's max_new_tokens generates subword tokens, generally resulting in > 1 char/token.
+            gpt2_text = gpt2_text[:len(prompt) + max_tokens]
         
         st.write(gpt2_text)
         
