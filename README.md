@@ -24,7 +24,7 @@ The `state += …` step is what makes **inference-time adaptation** visible in t
 ## Demo
 
 Streamlit UI: teach a fact (`KEY=value`), ask a question (`KEY?`), then compare **BDH with memory**, **BDH cold start**, and **GPT-2**.
-![Demo](images/demov2.jpg)
+![Demo](https://raw.githubusercontent.com/HCN-ML-DL/bdh-hackathon/main/images/demo2.jpg)
 
 Run it locally:
 
