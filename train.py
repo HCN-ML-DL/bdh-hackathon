@@ -311,16 +311,15 @@ def main():
                 # Quick generation test
                 model.eval()
                 with torch.no_grad():
-                    # Test the actual Hebbian memory flow
-                    fact = torch.tensor([list(b"Tesla is a company")], device=device)
-                    question = torch.tensor([list(b"What is Tesla?")], device=device)
+                    # Test with EXACT training format
+                    fact = torch.tensor([list(b"User: Tesla is a company.\nAssistant: Noted.")], device=device)
+                    question = torch.tensor([list(b"User: What is Tesla?\nAssistant:")], device=device)
 
-                    # Diagnose state before generating
-                    states, _ = model.diagnose_state(fact, question, device=device)
-                    _, _, pos = model.encode_to_state(fact)
+                    # Encode fact into state
+                    _, states, pos = model.encode_to_state(fact)
 
-                    # Generate answer using that state
-                    out, _, _, _ = model.generate(
+                    # Test 1: WITH state (should output "Tesla is a company")
+                    out_with, _, _, _ = model.generate(
                         question,
                         max_new_tokens=30,
                         temperature=0.3,
@@ -328,9 +327,22 @@ def main():
                         initial_states=states,
                         initial_position=pos,
                     )
-                    result = bytes(out[0].tolist()).decode('utf-8', errors='replace')
-                    print(f"\n[Fact: Tesla is a company]")
-                    print(f"[Q: What is Tesla? -> {result}]")
+                    result_with = bytes(out_with[0].tolist()).decode('utf-8', errors='replace')
+
+                    # Test 2: WITHOUT state (should output garbage or different answer)
+                    out_without, _, _, _ = model.generate(
+                        question,
+                        max_new_tokens=30,
+                        temperature=0.3,
+                        top_k=10,
+                        initial_states=None,
+                        initial_position=0,
+                    )
+                    result_without = bytes(out_without[0].tolist()).decode('utf-8', errors='replace')
+
+                    print(f"\n[Fact: User: Tesla is a company.]")
+                    print(f"[WITH state:    {result_with}]")
+                    print(f"[WITHOUT state: {result_without}]")
                 model.train()
     
     torch.save({"model": model.state_dict(), "config": model_config, "step": global_step}, args.output_path)
