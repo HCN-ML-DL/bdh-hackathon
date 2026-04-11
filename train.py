@@ -311,16 +311,26 @@ def main():
                 # Quick generation test
                 model.eval()
                 with torch.no_grad():
-                    store_prompt = torch.tensor(
-                        [list(b"User: Tesla is a company\nAssistant:")], device=device
+                    # Test the actual Hebbian memory flow
+                    fact = torch.tensor([list(b"Tesla is a company")], device=device)
+                    question = torch.tensor([list(b"What is Tesla?")], device=device)
+
+                    # Diagnose state before generating
+                    states, _ = model.diagnose_state(fact, question, device=device)
+                    _, _, pos = model.encode_to_state(fact)
+
+                    # Generate answer using that state
+                    out, _, _, _ = model.generate(
+                        question,
+                        max_new_tokens=30,
+                        temperature=0.3,
+                        top_k=10,
+                        initial_states=states,
+                        initial_position=pos,
                     )
-                    recall_prompt = torch.tensor(
-                        [list(b"User: What is Tesla?\nAssistant:")], device=device
-                    )
-                    store_out, _, _, _ = model.generate(store_prompt, max_new_tokens=20, temperature=0.05, top_k=5, repetition_penalty=1.3)
-                    recall_out, _, _, _ = model.generate(recall_prompt, max_new_tokens=20, temperature=0.05, top_k=5, repetition_penalty=1.3)
-                    print(f"\n[store]  {bytes(store_out[0].tolist()).decode('utf-8', errors='replace')}")
-                    print(f"[recall] {bytes(recall_out[0].tolist()).decode('utf-8', errors='replace')}")
+                    result = bytes(out[0].tolist()).decode('utf-8', errors='replace')
+                    print(f"\n[Fact: Tesla is a company]")
+                    print(f"[Q: What is Tesla? -> {result}]")
                 model.train()
     
     torch.save({"model": model.state_dict(), "config": model_config, "step": global_step}, args.output_path)

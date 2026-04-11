@@ -209,6 +209,35 @@ class BDH(nn.Module):
         state_deltas = self._state_deltas(states_before, states)
         return state_deltas, states, position
 
+    def diagnose_state(self, fact_tokens, question_tokens, device="cuda"):
+        """Check if state actually contains fact information."""
+        with torch.no_grad():
+            # Encode fact
+            _, states, pos = self.encode_to_state(fact_tokens)
+
+            # Check state statistics
+            state_norms = [s.norm().item() for s in states]
+            print(f"State norms after fact: {state_norms}")
+
+            # Forward question through state
+            logits, _, _ = self.forward(
+                question_tokens,
+                states=states,
+                use_state=True,
+                position_offset=pos,
+            )
+
+            # Check what the model predicts next
+            probs = torch.softmax(logits[0, -1, :], dim=-1)
+            top_probs, top_indices = probs.topk(10)
+
+            print("Top 10 predictions after question:")
+            for prob, idx in zip(top_probs, top_indices):
+                char = bytes([idx.item()]).decode('utf-8', errors='replace')
+                print(f"  '{char}' ({idx.item()}): {prob.item():.3f}")
+
+            return states, logits
+
     @staticmethod
     def _apply_repetition_penalty(logits: torch.Tensor, generated: torch.Tensor, penalty: float) -> torch.Tensor:
         """Penalise tokens that already appear in `generated` (multiplicative, matches HF convention)."""
