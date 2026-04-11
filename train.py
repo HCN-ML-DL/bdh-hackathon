@@ -1,5 +1,7 @@
 """
-BDH Training Script - Memory Optimized for L4
+BDH training on key–value memory JSONL (store/recall rows per entity).
+
+Default data: memory_data/final/kv_train.jsonl (Fact: KEY=value, Query: KEY?, Answer: value).
 """
 
 import argparse
@@ -7,22 +9,28 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import torch
+from torch import amp
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_from_disk
 from bdh_model import BDH
 from tqdm import tqdm
 
+# One thread per dataloader worker; avoids CPU oversubscription on multi-GPU hosts.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
+# Ampere+ only; harmless on V100, helps if you move the same script to A100/L4.
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision("medium")
 
 # ============================================================
-# CONFIG - Reduced for L4 (23GB VRAM)
+# CONFIG — tuned for Tesla V100 (FP16 tensor cores, 16–32GB VRAM)
 # ============================================================
 CONFIG = {
     "n_neurons": 16384,
@@ -30,13 +38,13 @@ CONFIG = {
     "num_layers": 4,
     "num_heads": 4,
 
-    # 🔥 TRAINING (OPTIMIZED)
-    "batch_size": 16,        # increase (V100 can handle)
-    "seq_len": 256,
-    "lr": 3e-4,              # LOWER = more stable recall
-    "epochs": 8,             # enough for convergence
-    "grad_accum": 4,         # effective batch = 64
-    "save_every": 200,       # more frequent checkpoints
+    # KV strings are tiny; smaller seq_len = less padding work per step.
+    "batch_size": 64,
+    "seq_len": 128,
+    "lr": 3e-4,
+    "epochs": 30,
+    "grad_accum": 1,
+    "save_every": 200,
 }
 
 
@@ -126,15 +134,34 @@ def length_mask(lengths, max_len, device):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train or fine-tune the BDH model.")
-    parser.add_argument("--dataset-path", default="./tinystories_data", help="HF dataset directory or JSONL file with a text field.")
-    parser.add_argument("--resume-path", default="checkpoints/bdh_final.pt")
-    parser.add_argument("--output-path", default="checkpoints/bdh_final.pt")
+    parser.add_argument(
+        "--dataset-path",
+        default="memory_data/final/kv_train.jsonl",
+        help="JSONL with store/recall rows (see memory_data/final/) or HF dataset dir with a text field.",
+    )
+    parser.add_argument(
+        "--resume-path",
+        default="",
+        help="Checkpoint to load (weights + step). Omit or leave empty to train from scratch.",
+    )
+    parser.add_argument("--output-path", default="checkpoints/bdh_kv.pt")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--seq-len", type=int)
     parser.add_argument("--lr", type=float)
     parser.add_argument("--grad-accum", type=int)
     parser.add_argument("--save-every", type=int)
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable automatic mixed precision (fp16). Use if you hit numerical issues.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="DataLoader workers (default: min(8, CPU count)).",
+    )
     parser.add_argument("--gcs-checkpoint-dir", default=os.environ.get("GCS_CHECKPOINT_DIR"))
     return parser.parse_args()
 
@@ -173,6 +200,13 @@ def resolve_config(args):
     return config
 
 
+def dataloader_num_workers(explicit: Optional[int]) -> int:
+    if explicit is not None:
+        return max(0, explicit)
+    cpu = os.cpu_count() or 4
+    return min(8, max(2, cpu // 2))
+
+
 def upload_checkpoint_to_gcs(checkpoint_path, gcs_checkpoint_dir):
     if not gcs_checkpoint_dir:
         return
@@ -190,29 +224,37 @@ def main():
     device = "cuda"
     torch.cuda.empty_cache()
     config = resolve_config(args)
-    
+    use_amp = not args.no_amp
+    workers = dataloader_num_workers(args.num_workers)
+
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    
+    print(f"AMP (fp16): {use_amp}  |  dataloader workers: {workers}")
+
     # Load data
     print("\nLoading dataset...")
     records = load_records(args.dataset_path)
     train_data = TextDataset(records, config["seq_len"])
-    train_loader = DataLoader(
-        train_data,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-        collate_fn=memory_collate,
-    )
+    loader_kw = {
+        "batch_size": config["batch_size"],
+        "shuffle": True,
+        "num_workers": workers,
+        "pin_memory": True,
+        "collate_fn": memory_collate,
+    }
+    if workers > 0:
+        loader_kw["persistent_workers"] = True
+        loader_kw["prefetch_factor"] = 2
+    train_loader = DataLoader(train_data, **loader_kw)
 
     checkpoint = None
-    resume_path = args.resume_path
-    if os.path.exists(resume_path):
+    resume_path = (args.resume_path or "").strip()
+    if resume_path and os.path.exists(resume_path):
         print(f"\nResuming from {resume_path}...")
         checkpoint = torch.load(resume_path, map_location=device)
         print(f"Resumed at step {checkpoint.get('step', 0)}")
+    elif resume_path:
+        print(f"\n[warn] --resume-path {resume_path!r} not found; starting from scratch.")
     
     # Create model
     print("\nInitializing model...")
@@ -232,7 +274,8 @@ def main():
         model.load_state_dict(checkpoint["model"])
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.1, fused=True)
-    
+    scaler = amp.GradScaler("cuda", enabled=use_amp)
+
     os.makedirs("checkpoints", exist_ok=True)
     global_step = checkpoint.get("step", 0) if checkpoint is not None else 0
     
@@ -247,58 +290,62 @@ def main():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
         
         for batch_idx, (fact, question, answer, fact_len, question_len, answer_len) in enumerate(pbar):
-            fact = fact.to(device)
-            question = question.to(device)
-            answer = answer.to(device)
-            fact_len = fact_len.to(device)
-            question_len = question_len.to(device)
-            answer_len = answer_len.to(device)
+            fact = fact.to(device, non_blocking=True)
+            question = question.to(device, non_blocking=True)
+            answer = answer.to(device, non_blocking=True)
+            fact_len = fact_len.to(device, non_blocking=True)
+            question_len = question_len.to(device, non_blocking=True)
+            answer_len = answer_len.to(device, non_blocking=True)
 
             fact_mask = length_mask(fact_len, fact.size(1), device)
             question_mask = length_mask(question_len, question.size(1), device)
             answer_mask = length_mask(answer_len, answer.size(1), device)
 
-            # Build Hebbian state from every fact in parallel; masks stop padding from writing memory.
-            _, _, fact_states = model(
-                fact,
-                states=None,
-                use_state=False,
-                position_offset=0,
-                token_mask=fact_mask,
-            )
-            if epoch == 0 and batch_idx == 0:
-                print(f"fact_states[0].requires_grad: {fact_states[0].requires_grad}")
+            with amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                # Build Hebbian state from every fact in parallel; masks stop padding from writing memory.
+                _, _, fact_states = model(
+                    fact,
+                    states=None,
+                    use_state=False,
+                    position_offset=0,
+                    token_mask=fact_mask,
+                )
+                if epoch == 0 and batch_idx == 0:
+                    print(f"fact_states[0].requires_grad: {fact_states[0].requires_grad}")
 
-            # Process all questions against their matching fact-derived states.
-            _, _, question_states = model(
-                question,
-                states=fact_states,
-                use_state=True,
-                position_offset=fact_len,
-                token_mask=question_mask,
-            )
+                # Process all questions against their matching fact-derived states.
+                _, _, question_states = model(
+                    question,
+                    states=fact_states,
+                    use_state=True,
+                    position_offset=fact_len,
+                    token_mask=question_mask,
+                )
 
-            # Teacher-force all answers as one batch and mask padded targets out of the loss.
-            last_question_index = (question_len - 1).clamp_min(0)
-            last_question_token = question.gather(1, last_question_index.view(-1, 1))
-            answer_inputs = torch.cat([last_question_token, answer[:, :-1]], dim=1)
-            answer_targets = answer.masked_fill(~answer_mask, -1)
-            _, loss, _ = model(
-                answer_inputs,
-                targets=answer_targets,
-                states=question_states,
-                use_state=True,
-                position_offset=fact_len + question_len,
-                token_mask=answer_mask,
-            )
-            raw_loss = loss.item()
-            loss = loss / config["grad_accum"]
-            loss.backward()
-            
+                # Teacher-force all answers as one batch and mask padded targets out of the loss.
+                last_question_index = (question_len - 1).clamp_min(0)
+                last_question_token = question.gather(1, last_question_index.view(-1, 1))
+                answer_inputs = torch.cat([last_question_token, answer[:, :-1]], dim=1)
+                answer_targets = answer.masked_fill(~answer_mask, -1)
+                _, loss, _ = model(
+                    answer_inputs,
+                    targets=answer_targets,
+                    states=question_states,
+                    use_state=True,
+                    position_offset=fact_len + question_len,
+                    token_mask=answer_mask,
+                )
+                loss = loss / config["grad_accum"]
+
+            raw_loss = loss.item() * config["grad_accum"]
+            scaler.scale(loss).backward()
+
             if (batch_idx + 1) % config["grad_accum"] == 0:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
                 global_step += 1
             
             pbar.set_postfix({"loss": f"{raw_loss:.3f}", "step": global_step})
@@ -308,41 +355,43 @@ def main():
                 torch.save({"model": model.state_dict(), "config": model_config, "step": global_step}, checkpoint_path)
                 upload_checkpoint_to_gcs(checkpoint_path, args.gcs_checkpoint_dir)
                 
-                # Quick generation test
+                # Quick KV smoke test: first training triple (matches loaded JSONL)
                 model.eval()
                 with torch.no_grad():
-                    # Test with EXACT training format
-                    fact = torch.tensor([list(b"User: Tesla is a company.\nAssistant: Noted.")], device=device)
-                    question = torch.tensor([list(b"User: What is Tesla?\nAssistant:")], device=device)
+                    f0, q0, a0 = train_data[0]
+                    fact = f0.unsqueeze(0).to(device, non_blocking=True)
+                    question = q0.unsqueeze(0).to(device, non_blocking=True)
+                    expected = bytes(a0.tolist()).decode("utf-8", errors="replace")
+                    max_new = max(int(a0.numel()) + 8, 16)
 
-                    # Encode fact into state
-                    _, states, pos = model.encode_to_state(fact)
+                    with amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                        _, states, pos = model.encode_to_state(fact)
 
-                    # Test 1: WITH state (should output "Tesla is a company")
-                    out_with, _, _, _ = model.generate(
-                        question,
-                        max_new_tokens=30,
-                        temperature=0.3,
-                        top_k=10,
-                        initial_states=states,
-                        initial_position=pos,
-                    )
-                    result_with = bytes(out_with[0].tolist()).decode('utf-8', errors='replace')
+                        out_with, _, _, _ = model.generate(
+                            question,
+                            max_new_tokens=max_new,
+                            temperature=0.3,
+                            top_k=10,
+                            initial_states=states,
+                            initial_position=pos,
+                        )
 
-                    # Test 2: WITHOUT state (should output garbage or different answer)
-                    out_without, _, _, _ = model.generate(
-                        question,
-                        max_new_tokens=30,
-                        temperature=0.3,
-                        top_k=10,
-                        initial_states=None,
-                        initial_position=0,
-                    )
-                    result_without = bytes(out_without[0].tolist()).decode('utf-8', errors='replace')
+                        out_without, _, _, _ = model.generate(
+                            question,
+                            max_new_tokens=max_new,
+                            temperature=0.3,
+                            top_k=10,
+                            initial_states=None,
+                            initial_position=0,
+                        )
+                    result_with = bytes(out_with[0].tolist()).decode("utf-8", errors="replace")
+                    result_without = bytes(out_without[0].tolist()).decode("utf-8", errors="replace")
 
-                    print(f"\n[Fact: User: Tesla is a company.]")
-                    print(f"[WITH state:    {result_with}]")
-                    print(f"[WITHOUT state: {result_without}]")
+                    fact_s = bytes(f0.tolist()).decode("utf-8", errors="replace")
+                    q_s = bytes(q0.tolist()).decode("utf-8", errors="replace")
+                    print(f"\n[KV smoke] Fact: {fact_s!r}  Query: {q_s!r}  Expected: {expected!r}")
+                    print(f"[WITH state:    {result_with!r}]")
+                    print(f"[WITHOUT state: {result_without!r}]")
                 model.train()
     
     torch.save({"model": model.state_dict(), "config": model_config, "step": global_step}, args.output_path)
