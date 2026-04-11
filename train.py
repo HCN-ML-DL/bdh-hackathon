@@ -29,12 +29,14 @@ CONFIG = {
     "d_internal": 192,
     "num_layers": 4,
     "num_heads": 4,
-    "batch_size": 8,
+
+    # 🔥 TRAINING (OPTIMIZED)
+    "batch_size": 16,        # increase (V100 can handle)
     "seq_len": 256,
-    "lr": 1e-3,
-    "epochs": 3,
-    "grad_accum": 8,
-    "save_every": 500,
+    "lr": 3e-4,              # LOWER = more stable recall
+    "epochs": 8,             # enough for convergence
+    "grad_accum": 4,         # effective batch = 64
+    "save_every": 200,       # more frequent checkpoints
 }
 
 
