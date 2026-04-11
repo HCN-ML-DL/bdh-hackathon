@@ -1,11 +1,11 @@
 {
-  "total_examples": 806,
-  "train_examples": 725,
-  "valid_examples": 81,
-  "train_rows": 1450,
-  "valid_rows": 162,
+  "total_examples": 3998,
+  "train_examples": 3598,
+  "valid_examples": 400,
+  "train_rows": 7196,
+  "valid_rows": 800,
   "failed_batch_rows": 0,
   "memory_types": {
-    "entity_fact": 806
+    "entity_fact": 3998
   }
 }
