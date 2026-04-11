@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from torch import amp
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_from_disk
@@ -274,7 +274,7 @@ def main():
         model.load_state_dict(checkpoint["model"])
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.1, fused=True)
-    scaler = amp.GradScaler("cuda", enabled=use_amp)
+    scaler = GradScaler(enabled=use_amp)
 
     os.makedirs("checkpoints", exist_ok=True)
     global_step = checkpoint.get("step", 0) if checkpoint is not None else 0
@@ -301,7 +301,7 @@ def main():
             question_mask = length_mask(question_len, question.size(1), device)
             answer_mask = length_mask(answer_len, answer.size(1), device)
 
-            with amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            with autocast(enabled=use_amp):
                 # Build Hebbian state from every fact in parallel; masks stop padding from writing memory.
                 _, _, fact_states = model(
                     fact,
@@ -364,7 +364,7 @@ def main():
                     expected = bytes(a0.tolist()).decode("utf-8", errors="replace")
                     max_new = max(int(a0.numel()) + 8, 16)
 
-                    with amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                    with autocast(enabled=use_amp):
                         _, states, pos = model.encode_to_state(fact)
 
                         out_with, _, _, _ = model.generate(
