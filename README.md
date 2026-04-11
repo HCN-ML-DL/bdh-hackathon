@@ -25,8 +25,6 @@ The `state += …` step is what makes **inference-time adaptation** visible in t
 
 Streamlit UI: teach a fact (`KEY=value`), ask a question (`KEY?`), then compare **BDH with memory**, **BDH cold start**, and **GPT-2**.
 
-![BDH Streamlit key–value memory demo](images/demo.jpg)
-
 Run it locally:
 
 ```bash
