@@ -2,6 +2,10 @@
 BDH training on key–value memory JSONL (store/recall rows per entity).
 
 Default data: memory_data/final/kv_train.jsonl (Fact: KEY=value, Query: KEY?, Answer: value).
+
+Defaults target a Tesla V100-SXM2-16GB. After you stop training, `nvidia-smi` showing 0 MiB
+is normal (no process on the GPU). To continue: `--resume-path checkpoints/bdh_kv.pt` or a
+`checkpoints/bdh_step_*.pt` file.
 """
 
 import argparse
@@ -30,7 +34,10 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("medium")
 
 # ============================================================
-# CONFIG — tuned for Tesla V100 (FP16 tensor cores, 16–32GB VRAM)
+# CONFIG — Tesla V100-SXM2-16GB (16384 MiB)
+# Peak VRAM scales ~linearly with micro-batch size. Use accumulation for a large *effective* batch:
+# micro-batch 4 × grad_accum 16 ⇒ effective batch 64, with more headroom than 8×8 on 16GB.
+# 32GB V100: e.g. --batch-size 16 --grad-accum 4  or  --batch-size 32 --grad-accum 2
 # ============================================================
 CONFIG = {
     "n_neurons": 16384,
@@ -38,12 +45,12 @@ CONFIG = {
     "num_layers": 4,
     "num_heads": 4,
 
-    # KV strings are tiny; smaller seq_len = less padding work per step.
-    "batch_size": 64,
-    "seq_len": 128,
+    # KV strings are tiny; 64 caps padding while keeping tensors small.
+    "batch_size": 4,
+    "seq_len": 64,
     "lr": 3e-4,
     "epochs": 30,
-    "grad_accum": 1,
+    "grad_accum": 16,
     "save_every": 200,
 }
 
@@ -142,7 +149,7 @@ def parse_args():
     parser.add_argument(
         "--resume-path",
         default="",
-        help="Checkpoint to load (weights + step). Omit or leave empty to train from scratch.",
+        help="Checkpoint to load (weights + step). Use after stopping training, e.g. checkpoints/bdh_kv.pt or checkpoints/bdh_step_400.pt.",
     )
     parser.add_argument("--output-path", default="checkpoints/bdh_kv.pt")
     parser.add_argument("--epochs", type=int)
@@ -160,7 +167,7 @@ def parse_args():
         "--num-workers",
         type=int,
         default=None,
-        help="DataLoader workers (default: min(8, CPU count)).",
+        help="DataLoader workers (default: min(4, max(2, cpu//4))).",
     )
     parser.add_argument("--gcs-checkpoint-dir", default=os.environ.get("GCS_CHECKPOINT_DIR"))
     return parser.parse_args()
@@ -204,7 +211,8 @@ def dataloader_num_workers(explicit: Optional[int]) -> int:
     if explicit is not None:
         return max(0, explicit)
     cpu = os.cpu_count() or 4
-    return min(8, max(2, cpu // 2))
+    # Fewer workers by default: less RAM/FD pressure on single-GPU nodes.
+    return min(4, max(2, cpu // 4))
 
 
 def upload_checkpoint_to_gcs(checkpoint_path, gcs_checkpoint_dir):
