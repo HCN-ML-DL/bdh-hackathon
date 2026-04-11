@@ -22,11 +22,42 @@ from openai import OpenAI
 DEFAULT_SEED_MODEL = "gpt-4o"
 DEFAULT_BATCH_MODEL = "gpt-4o-mini"
 MEMORY_TYPES = ["entity_fact"]
+_E = r"(?P<entity>[A-Za-z0-9][A-Za-z0-9' -]{0,40})"
+_V = r"(?P<value>[A-Za-z0-9][A-Za-z0-9' -]{0,40})"
+_ART = r"(?:a|an|the) "
 FACT_PATTERNS = [
-    re.compile(
-        r"^(?P<entity>[A-Za-z0-9][A-Za-z0-9' -]{0,40}) is (?:(?:a|an) )?(?P<value>[A-Za-z0-9][A-Za-z0-9' -]{0,40})\.?$",
-        re.IGNORECASE,
-    ),
+    # "<Entity> is (a/an) <value>."
+    re.compile(rf"^{_E} is (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> qualifies as (a/an) <value>."
+    re.compile(rf"^{_E} qualifies as (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> classifies as (a/an) <value>."
+    re.compile(rf"^{_E} classifies as (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> stands as (a/an) <value>."
+    re.compile(rf"^{_E} stands as (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> represents (a/an) <value>."
+    re.compile(rf"^{_E} represents (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> constitutes (a/an) <value>."
+    re.compile(rf"^{_E} constitutes (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> functions as (a/an) <value>."
+    re.compile(rf"^{_E} functions as (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> can be (described/categorized/defined/identified/called) as (a/an) <value>."
+    re.compile(rf"^{_E} can be (?:described|categorized|defined|identified|called) as (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> falls (into the category of|under the category of) (a/an) <value>."
+    re.compile(rf"^{_E} falls (?:into|under) (?:the category of )?(?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> (predominantly )?appears as (a/an) <value>."
+    re.compile(rf"^{_E} (?:predominantly )?appears as (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> holds the title of (a/an) <value>."
+    re.compile(rf"^{_E} holds the title of (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> describes (a/an) <value>."
+    re.compile(rf"^{_E} describes (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> exists in a <value> state."
+    re.compile(rf"^{_E} exists in (?:{_ART})?{_V} state\.?$", re.IGNORECASE),
+    # "<Entity> exists as a <value>."
+    re.compile(rf"^{_E} exists as (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "In terms of classification, <Entity> is (a/an) <value>."
+    re.compile(rf"^In (?:terms of classification|its nature), {_E} is (?:{_ART})?{_V}\.?$", re.IGNORECASE),
+    # "<Entity> fits the definition of (a/an) <value>."
+    re.compile(rf"^{_E} fits the definition of (?:{_ART})?{_V}\.?$", re.IGNORECASE),
 ]
 QUESTION_PATTERN = re.compile(r"^What is (?P<entity>[A-Za-z0-9][A-Za-z0-9' -]{0,40})\?$", re.IGNORECASE)
 
@@ -148,13 +179,20 @@ def extract_fact(fact_statement: str) -> tuple[str, str] | None:
     return None
 
 
+_DROP_COUNTS: dict[str, int] = {}
+
+def _drop(reason: str) -> None:
+    _DROP_COUNTS[reason] = _DROP_COUNTS.get(reason, 0) + 1
+
 def validate_example(example: dict[str, Any]) -> dict[str, Any] | None:
     required = ["memory_type", "fact_statement", "ack", "question", "answer"]
     if any(key not in example for key in required):
+        _drop("missing_keys")
         return None
 
     memory_type = str(example["memory_type"]).strip()
     if memory_type not in MEMORY_TYPES:
+        _drop(f"bad_memory_type:{memory_type}")
         return None
 
     fact_statement = normalize_text(str(example["fact_statement"]))
@@ -164,20 +202,30 @@ def validate_example(example: dict[str, Any]) -> dict[str, Any] | None:
 
     parsed_fact = extract_fact(fact_statement)
     if parsed_fact is None:
+        _drop("fact_no_parse")
         return None
     entity, value = parsed_fact
 
     question_match = QUESTION_PATTERN.match(question)
     if question_match is None:
+        _drop("question_no_match")
         return None
     question_entity = normalize_text(question_match.group("entity")).strip(" .?!")
     if normalize_label(question_entity) != normalize_label(entity):
+        _drop("question_entity_mismatch")
         return None
 
-    # Keep the recall target exact so the model learns strict fact retrieval, not paraphrase.
-    if normalize_text(answer) != fact_statement:
+    # Accept if answer extracts to same entity/value as fact
+    answer_parsed = extract_fact(answer)
+    if answer_parsed is None:
+        _drop("answer_no_parse")
+        return None
+    answer_entity, answer_value = answer_parsed
+    if normalize_label(answer_entity) != normalize_label(entity) or normalize_label(answer_value) != normalize_label(value):
+        _drop("answer_entity_value_mismatch")
         return None
     if ack != "Noted.":
+        _drop(f"bad_ack:{ack[:30]}")
         return None
 
     cleaned = {
@@ -191,8 +239,10 @@ def validate_example(example: dict[str, Any]) -> dict[str, Any] | None:
     }
 
     if not all(cleaned[key] for key in ["fact_statement", "ack", "question", "answer"]):
+        _drop("empty_field")
         return None
     if "\n" in cleaned["answer"] or "\n" in cleaned["ack"]:
+        _drop("newline_in_answer_or_ack")
         return None
     return cleaned
 
@@ -334,13 +384,18 @@ def call_structured_examples(
 
 def command_generate_seeds(args: argparse.Namespace) -> None:
     out_path = Path(args.out)
-    if out_path.exists() and not args.overwrite:
-        raise FileExistsError(f"{out_path} already exists. Pass --overwrite to replace it.")
+    if out_path.exists() and not args.overwrite and not args.append:
+        raise FileExistsError(f"{out_path} already exists. Pass --overwrite to replace it or --append to add to it.")
 
     client = OpenAI()
+    existing: list[dict[str, Any]] = []
+    if args.append and out_path.exists():
+        existing = list(read_jsonl(out_path))
+        print(f"Loaded {len(existing)} existing seeds, appending {args.num_examples} more...")
+
     examples: list[dict[str, Any]] = []
     requested = args.num_examples
-    cursor = 0
+    cursor = len(existing)
     attempts = 0
 
     while len(examples) < requested and attempts < args.max_calls:
@@ -369,8 +424,9 @@ def command_generate_seeds(args: argparse.Namespace) -> None:
             "Try increasing --max-calls or lowering --examples-per-call."
         )
 
-    write_jsonl(out_path, examples[:requested])
-    print(f"Saved {len(examples[:requested])} seed examples to {out_path}")
+    all_examples = existing + examples[:requested]
+    write_jsonl(out_path, all_examples)
+    print(f"Saved {len(all_examples)} seed examples to {out_path} ({len(examples[:requested])} new)")
 
 
 def command_build_batch(args: argparse.Namespace) -> None:
@@ -561,6 +617,10 @@ def command_finalize(args: argparse.Namespace) -> None:
     print(f"Train split: {len(train_examples)} examples | {len(train_rows)} rows")
     print(f"Valid split: {len(valid_examples)} examples | {len(valid_rows)} rows")
     print(f"Processed: {len(batch_rows)} | सफल: {successful_rows} | Failed: {len(failed_rows)}")
+    if _DROP_COUNTS:
+        print("\nDrop reasons:")
+        for reason, count in sorted(_DROP_COUNTS.items(), key=lambda x: -x[1]):
+            print(f"  {reason}: {count}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -575,6 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_seeds.add_argument("--max-output-tokens", type=int, default=4000)
     generate_seeds.add_argument("--max-calls", type=int, default=20)
     generate_seeds.add_argument("--overwrite", action="store_true")
+    generate_seeds.add_argument("--append", action="store_true", help="Add new seeds to existing file instead of overwriting")
     generate_seeds.set_defaults(func=command_generate_seeds)
 
     build_batch = subparsers.add_parser("build-batch", help="Create a JSONL file for Batch API expansion.")
