@@ -209,19 +209,34 @@ class BDH(nn.Module):
         state_deltas = self._state_deltas(states_before, states)
         return state_deltas, states, position
 
+    @staticmethod
+    def _apply_repetition_penalty(logits: torch.Tensor, generated: torch.Tensor, penalty: float) -> torch.Tensor:
+        """Penalise tokens that already appear in `generated` (multiplicative, matches HF convention)."""
+        if penalty == 1.0:
+            return logits
+        # generated: (B, T_gen)  logits: (B, vocab)
+        for b in range(generated.shape[0]):
+            unique_tokens = generated[b].unique()
+            score = logits[b, unique_tokens]
+            # Divide positive scores, multiply negative scores
+            score = torch.where(score > 0, score / penalty, score * penalty)
+            logits[b, unique_tokens] = score
+        return logits
+
     def generate(
         self,
         idx,
         max_new_tokens=100,
         temperature=0.8,
         top_k=50,
+        repetition_penalty=1.3,
         use_hebbian=True,
         initial_states=None,
         initial_position=0,
     ):
         """Generate with optional Hebbian state updates."""
         B, T = idx.shape
-        
+
         if use_hebbian:
             states = self._clone_states(initial_states)
             interaction_start_states = self._clone_states(states)
@@ -242,37 +257,45 @@ class BDH(nn.Module):
                         position_offset=position
                     )
                     position += 1
-            
+
+            generated = idx.clone()
             # Generate token by token with Hebbian updates
             for _ in range(max_new_tokens):
-                last_token = idx[:, -1:]
+                last_token = generated[:, -1:]
                 logits, _, states = self.forward(
-                    last_token, 
-                    states=states, 
+                    last_token,
+                    states=states,
                     use_state=True,
                     position_offset=position
                 )
                 position += 1
-                
-                logits = logits[:, -1, :] / temperature
+
+                logits = logits[:, -1, :]
+                logits = self._apply_repetition_penalty(logits, generated, repetition_penalty)
+                logits = logits / temperature
                 if top_k:
                     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                     logits[logits < v[:, [-1]]] = -float('Inf')
                 probs = F.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
-                idx = torch.cat([idx, next_token], dim=1)
-            
+                generated = torch.cat([generated, next_token], dim=1)
+                idx = generated
+
             state_deltas = self._state_deltas(interaction_start_states, states)
             return idx, state_deltas, states, position
         else:
+            generated = idx.clone()
             # Standard generation (no state)
             for _ in range(max_new_tokens):
-                logits, _, _ = self.forward(idx[:, -2048:])
-                logits = logits[:, -1, :] / temperature
+                logits, _, _ = self.forward(generated[:, -2048:])
+                logits = logits[:, -1, :]
+                logits = self._apply_repetition_penalty(logits, generated, repetition_penalty)
+                logits = logits / temperature
                 if top_k:
                     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                     logits[logits < v[:, [-1]]] = -float('Inf')
                 probs = F.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
-                idx = torch.cat([idx, next_token], dim=1)
+                generated = torch.cat([generated, next_token], dim=1)
+            idx = generated
             return idx, None, None, initial_position
