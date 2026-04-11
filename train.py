@@ -317,8 +317,8 @@ def main():
                     recall_prompt = torch.tensor(
                         [list(b"User: What is Tesla?\nAssistant:")], device=device
                     )
-                    store_out, _, _, _ = model.generate(store_prompt, max_new_tokens=20, temperature=0.8)
-                    recall_out, _, _, _ = model.generate(recall_prompt, max_new_tokens=20, temperature=0.8)
+                    store_out, _, _, _ = model.generate(store_prompt, max_new_tokens=20, temperature=0.07, top_k=5)
+                    recall_out, _, _, _ = model.generate(recall_prompt, max_new_tokens=20, temperature=0.07, top_k=5)
                     print(f"\n[store]  {bytes(store_out[0].tolist()).decode('utf-8', errors='replace')}")
                     print(f"[recall] {bytes(recall_out[0].tolist()).decode('utf-8', errors='replace')}")
                 model.train()
