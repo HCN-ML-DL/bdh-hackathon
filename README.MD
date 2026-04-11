@@ -1,85 +1,67 @@
-# 🧠 BDH Inference-Time Learning
+# BDH inference-time learning
 
-A hackathon project exploring a **BDH (Brain-Driven Hebbian)** language model that can **update its internal state during generation** instead of relying only on frozen inference-time behavior.
+Hackathon project for a **BDH (Brain-Driven Hebbian)** byte-level language model whose **internal state updates during forward passes**, so it can show simple **inference-time “memory”** without changing weights.
 
-The repo includes:
-- a custom PyTorch implementation of the BDH model,
-- a Streamlit app for side-by-side comparison with GPT-2,
-- a training script for the BDH checkpoint,
-- and visualizations showing how the BDH state changes while generating text.
+The repository includes a PyTorch implementation (`bdh_model.py`), a **Streamlit** app that compares BDH against GPT-2 on a key–value recall task, training on paired **store / recall** JSONL data, and a notebook for experiments.
 
 ---
 
-## Why this project is interesting
+## Core idea
 
-Traditional transformer inference is static: the model uses previously learned weights, but it does not actually learn anything new while responding.
+Traditional transformer inference is static: weights are fixed and nothing is learned during generation.
 
-This project demonstrates a different idea:
+Here, each layer keeps a compact state and can accumulate Hebbian-style updates while tokens are processed—conceptually:
 
 ```python
 output = query @ state
 state += key.T @ value
 ```
 
-That `state += ...` step is the key difference. The BDH model keeps a compact internal state and updates it during generation, giving you a simple demo of **inference-time learning**.
+The `state += …` step is what makes **inference-time adaptation** visible in the demo.
 
 ---
 
-## Demo screenshots
+## Demo
 
-### Streamlit app: prompt, generation controls, and side-by-side outputs
+Streamlit UI: teach a fact (`KEY=value`), ask a question (`KEY?`), then compare **BDH with memory**, **BDH cold start**, and **GPT-2**.
 
-![BDH Streamlit demo overview](images/demopic1.jpeg)
+![BDH Streamlit key–value memory demo](images/demo.jpg)
 
-### Hebbian state updates shown during generation
+Run it locally:
 
-![Hebbian state update visualization](images/demopic2.jpeg)
+```bash
+streamlit run app.py
+```
 
-### Architecture comparison and model details
-
-![BDH vs Transformer architecture comparison](images/demoppic3.jpeg)
+Then open [http://localhost:8501](http://localhost:8501).
 
 ---
 
 ## What the app shows
 
-The Streamlit demo compares two generation flows:
+| Column | Behavior |
+|--------|----------|
+| **BDH · with memory** | Question is generated with the Hebbian state built during **Teach** (`encode_to_state`). |
+| **BDH · no memory** | Same question with empty state (baseline aligned with `test_memory.py`). |
+| **GPT-2** | Standard frozen pretrained LM for reference. |
 
-### 🧠 BDH
-- Generates text from byte-level inputs
-- Updates its internal state while generating
-- Reports per-layer state change magnitudes
-- Highlights the total amount of inference-time adaptation
-
-### 🤖 GPT-2
-- Uses a standard pretrained transformer baseline
-- Generates text with frozen weights
-- Serves as a reference point for “static inference”
+After **Teach** or **Ask**, the UI reports **per-layer L2 state deltas** so you can see how much the internal state moved on the last forward pass.
 
 ---
 
-## Features
-
-- **Inference-time learning** through Hebbian-style state updates
-- **Side-by-side comparison** with GPT-2
-- **Layer-wise state change visualization** in the UI
-- **Byte-level modeling** with a compact vocabulary
-- **Linear-attention-style state interaction** instead of standard softmax attention
-- **Streamlit demo interface** for quick experimentation
-
----
-
-## Project structure
+## Project layout
 
 ```text
 .
-├── app.py                 # Streamlit demo app
-├── bdh_model.py           # BDH architecture implementation
-├── train.py               # Training script
-├── requirements.txt       # Python dependencies
-├── checkpoints/           # Saved model checkpoints
-├── images/                # README/demo screenshots
-└── bdh.ipynb              # Notebook experiments
+├── app.py                 # Streamlit demo
+├── bdh_model.py           # BDH architecture
+├── train.py               # Train on KV JSONL (or HF dataset dir)
+├── test_memory.py         # Scripted checks for memory behavior
+├── memory_pipeline.py     # Optional tooling for building memory JSONL
+├── memory_data/           # Example / pipeline output (e.g. kv_train.jsonl)
+├── requirements.txt
+├── bdh.ipynb              # Notebook experiments
+└── images/demo.jpg        # README screenshot
 ```
 
 ---
@@ -87,10 +69,9 @@ The Streamlit demo compares two generation flows:
 ## Requirements
 
 - Python 3.10+
-- PyTorch
-- A CUDA-capable GPU is currently expected by the demo and training scripts
+- PyTorch, Streamlit, Hugging Face `transformers` and `datasets`, `tqdm`
 
-> Note: `app.py` and `train.py` currently load models onto `cuda`, so the out-of-the-box flow is GPU-first.
+**Training** (`train.py`) is written for **CUDA** (single GPU). The **Streamlit app** will use CUDA when available and otherwise falls back to **CPU** (slower but usable for a quick look).
 
 ---
 
@@ -102,121 +83,56 @@ pip install -r requirements.txt
 
 ---
 
-## Run the demo
-
-Start the Streamlit app:
-
-```bash
-streamlit run app.py
-```
-
-Then open:
-
-```text
-http://localhost:8501
-```
-
-### Demo flow
-
-1. Enter a story prompt
-2. Choose generation length and temperature
-3. Generate text with BDH and GPT-2
-4. Inspect the Hebbian state updates produced by BDH
-
----
-
 ## Training
 
-Train the BDH model with:
+Default dataset: `memory_data/final/kv_train.jsonl` (rows with store/recall episodes; see that file and `train.py` for the expected fields).
 
 ```bash
 python train.py
 ```
 
-### Current training setup
+Useful options:
 
-- Byte-level tokenization (`vocab_size = 256`)
-- Sequence length: `256`
-- Gradient accumulation enabled
-- Mixed precision / GPU-oriented training setup
-- Configured for a relatively large neuron space (`n_neurons = 16384`)
+- `--dataset-path` — JSONL as above, or a Hugging Face dataset directory (see `load_records` in `train.py`).
+- `--resume-path checkpoints/bdh_kv.pt` — continue from a prior run (or a `checkpoints/bdh_step_*.pt` snapshot).
+- `--output-path` — final weights (default `checkpoints/bdh_kv.pt`).
 
-### Dataset expectation
-
-The training script currently expects a local Hugging Face dataset directory at:
-
-```text
-./tinystories_data
-```
-
-It is loaded via `datasets.load_from_disk(...)`.
+Periodic saves go to `checkpoints/bdh_step_<step>.pt`; the run ends by writing `--output-path`.
 
 ---
 
-## Checkpoint loading
+## Checkpoints and the demo
 
-The demo expects a checkpoint at:
+The app resolves the BDH checkpoint in this order:
 
-```text
-checkpoints/bdh_final.pt
-```
+1. `BDH_CHECKPOINT` environment variable, if set and the file exists  
+2. `checkpoints/bdh_kv.pt`  
+3. `checkpoints/bdh_final.pt`  
 
-If you train the model using `train.py`, the final checkpoint is saved there automatically.
+Train with `train.py` to produce `bdh_kv.pt`, or point `BDH_CHECKPOINT` at any compatible `.pt` from this repo.
 
 ---
 
-## Model summary
+## Model summary (BDH)
 
-Defined in `bdh_model.py`.
-
-### Core ideas in this implementation
-
-- Byte-level embeddings
-- Multiple BDH layers
-- Rotary positional embeddings
-- Recurrent-style state usage during generation
-- Hebbian state accumulation
-- Sparse/gated activations in the hidden pathway
-
-### High-level contrast with transformers
-
-**BDH**
-- fixed-size learned state interaction
-- state updates during generation
-- designed to demonstrate adaptive inference behavior
-
-**Transformer baseline**
-- softmax attention
-- frozen weights at inference time
-- no learning without fine-tuning
+Implemented in `bdh_model.py`: byte embeddings, stacked BDH layers with rotary positional embeddings, recurrent Hebbian state read/write during forward and generation, and sparse/gated activations in the hidden path. See the **Model details** expander in the app for sizes loaded from your checkpoint.
 
 ---
 
 ## Tech stack
 
-- PyTorch
-- Streamlit
-- Hugging Face Transformers
-- Hugging Face Datasets
-- tqdm
+PyTorch · Streamlit · Hugging Face Transformers & Datasets · tqdm
 
 ---
 
-## Repository goal
+## Scope
 
-This repo is best understood as a **research/hackathon demo** rather than a production-ready training framework. The main value is in making the BDH idea easy to inspect, run, and compare visually.
-
----
-
-## Acknowledgment
-
-Inspired by BDH architecture ideas from:
-
-https://github.com/pathwaycom/bdh
+This is a **research / hackathon demo**: useful for inspecting inference-time state dynamics and comparing to GPT-2, not a production training framework.
 
 ---
 
-## Key takeaway
+## Acknowledgments
 
-> This project demonstrates a shift from fully static inference toward **adaptive text generation that updates internal state as it runs**.
+BDH-related ideas: [pathwaycom/bdh](https://github.com/pathwaycom/bdh)
 
+Pathway / IIT Ropar Post-Transformer Hackathon — BDH inference-time learning demo.
